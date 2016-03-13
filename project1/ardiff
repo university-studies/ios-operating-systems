@@ -1,0 +1,585 @@
+#!/bin/sh
+
+#Encoding: utf-8
+#Project: 1. do predmetu IOS, varianta A
+#Author: Pavol Loffay BIB-30, xloffa00
+#Date: 4.3.2011
+#Description: vytvorte skript, ktory vytvara rozdielny archiv pomocou diff -u, a nasledne aplikuje 
+#               zmeny na povodny archiv
+export LC_ALL=C
+
+ADRESS="/tmp/ardiff.$$"
+OLD_ADRESS=`pwd`
+ARGUMENT=0
+LIST=0
+DO_SUBORU=0
+ROZDIELNY=0
+APLY_ROZDIELNY=0
+RESERVE=0
+
+#funkcia sa zavola ak sa odchiti signal pomocou trap
+clean()
+{
+	cd "$OLD_ADRESS"
+	if [ -d "$ADRESS" ];then
+		rm -R "$ADRESS"
+	fi
+	printf "%s" "Chyba, koniec skriptu!" >&2
+	printf "\n" >&2
+	exit 2
+}
+
+#odchiti signal
+trap clean SIGINT SIGTERM SIGHUP SIGTSTP
+
+#funkcia vytlaci svoj jeden argument na stderr a ukonci skript s 1
+errorExit()
+{
+	cd "$OLD_ADRESS"
+	if [ -d "$ADRESS" ]; then
+		rm -R "$ADRESS"
+	fi
+	printf "%s" "$1" >&2
+	printf "\n" >&2
+	exit 1
+}
+
+#funkcia ukonci skript s exit 0
+successExit()
+{	
+	cd "$OLD_ADRESS"
+	if [ -d "$ADRESS" ];then
+		rm -f -R "$ADRESS"
+	fi
+	exit 0
+}
+
+#funkcia dostane dva argumenty nazov archivu a adresara kde sa ma rozbalit
+#zisti akeho je typu a podla toho ho rozbali do /tmp/$$.ardiff/extract/$2-argument2
+unzipArguments() 
+{
+	ZIP="ZIP archive" #krok to ma ZIP
+	zip="Zip archive" 
+	tar="tar archive"
+	tar_bzip2="bzip2 compressed data"
+	gzip="gzip compressed data"
+	file_type=`file $1`
+
+	if [ -f $1 ]; then
+		mkdir -p "$ADRESS"/extract/"$2"
+		case "$file_type" in
+		*"$zip"* | *"$ZIP"*)
+			unzip -qq "$1" -d "$ADRESS"/extract/"$2"
+			;;
+		*"$tar"*)
+			tar -C "$ADRESS"/extract/"$2" -xf "$1"
+			;;
+		*"$tar_bzip2"*)
+			tar -C "$ADRESS"/extract/"$2" -xjf "$1" 
+			;;
+		*"$gzip"*)
+			tar -C "$ADRESS"/extract/"$2" -xzf "$1"
+			;;
+		*)
+			errorExit "Zadali ste nepodporovany typ archivu $1"
+			;;
+		esac
+	else
+		errorExit "Subor $1 neexistuje, alebo nemate pravo na citanie!" 
+	fi
+}
+
+#funkcia dostane jeden agument nazov zlozky v /tmp/$$.ardiff/extract/nazov_zlozky
+#do dir_all ulozi cesty k vsetkym regularnym suborom v danom priecinku
+getDirections()
+{
+	dir_all=""
+	cd "$ADRESS"/extract
+	dir=`find -L $1`
+	dir=`printf "%s" "$dir" | sed -r 's/( )/~\/~/g'`
+	for i in $dir
+	do	
+		i_ok=`printf "%s" "$i" | sed -r 's/(~\/~)/ /g'`
+		if [ -f "$i_ok" ]; then
+			if [ -r "$i_ok" ];then 
+				if [ -z "$dir_all" ];then
+					dir_all="$i"
+				else
+					dir_all=`printf "%s" "$dir_all"; printf "\n"; printf "%s" "$i"`
+				fi
+			else
+				errorExit "Pre citanie subora $i_ok, nemate pravo!"
+			fi
+		fi
+	done
+	cd ..
+}
+
+#funkcia dostane 2 argumenty, voboch su ulozene cesty k suborom
+#v danych archivoch, cesty zacinaju a/ alebo b/
+#v DIR_SPOLOCNE vrati ktore adresy k suborom sa zhoduju
+#v DIR_ROZDIELNE vrati ktore adresy sa nezhoduju
+compareDirections()
+{
+	for i in $1
+	do
+		i_upravene=`printf "%s" "$i" | sed -r 's/a(.*)/b\1/'`
+		spolocne=`printf "%s" "$2" | grep -F -x "$i_upravene"`
+		#ak sme nasli nieco spolocne tak si to ulozim
+		if [ -n "$spolocne" ];then
+		#aby sa na zaciatku premennej nedal znak "\n"
+			if [ -z "$DIR_SPOLOCNE" ];then
+				DIR_SPOLOCNE="$i"
+			else
+				DIR_SPOLOCNE=`printf "%s" "$DIR_SPOLOCNE"; printf "\n"; printf "%s" "$i"`
+			fi
+		else
+			if [ -z "$DIR_ROZDIELNE_A" ];then
+				DIR_ROZDIELNE_A="$i"
+			else
+				DIR_ROZDIELNE_A=`printf "%s" "$DIR_ROZDIELNE_A"; printf "\n"; printf "%s" "$i"`
+			fi	
+		fi
+	done
+
+	#konstrukcia najde subory, ktore su iba b/ a v a/ niesu
+
+	for i in $2
+	do
+		i_upravene=`printf "%s" "$i" | sed -r 's/b(.*)/a\1/'`
+		spolocne=`printf "%s" "$1" | grep -F -x "$i_upravene"`
+		#ak sme nasli nieco spolocne tak si to ulozim
+		if [ -z "$spolocne" ];then
+		#aby sa na zaciatku premennej nedal znak "\n"
+			if [ -z "$DIR_ROZDIELNE_B" ];then
+				DIR_ROZDIELNE_B="$i"
+			else
+				DIR_ROZDIELNE_B=`printf "%s" "$DIR_ROZDIELNE_B"; printf "\n"; printf "%s" "$i"`
+			fi	
+		fi
+	done
+	#spoji rozdielne z a/ a b/
+	DIR_ROZDIELNE=`printf "%s" "$DIR_ROZDIELNE_A"; printf "\n"; printf "%s" "$DIR_ROZDIELNE_B"`	
+}
+
+#funkcia dostane 2 argumenty a do tmp/$$.ardiff/c/
+#vola sa s DIR_SPOLOCNE a DIR_ROZDIELNE
+#skopiruje subory, ktore boli v a/ a b/ rozdielne cize 
+#vystup z diff -u a/ b/ sa lisil 
+#alebo sa subor nachadzal iba v jednom archive
+#vrati LIST_DIR v ktorej su ulozene cesty k rozdielnym suborom -l prepinac
+createArch()
+{	
+	#vsetky  cesty zacinaju a/
+	cd "$ADRESS"/extract
+	mkdir -p "$ADRESS/extract/diff"
+
+	for i_a in $1
+	do #nahradenie ~~ za ( )-space
+		i_a_ok=`printf "%s" "$i_a" | sed -r 's/(~\/~)/ /g'`  
+		i_b=`printf "%s" "$i_a_ok" | sed -r 's/a(.*)/b\1/'`
+		#nazov suboru aj s priponov patch
+		name=`printf "%s" "$i_a_ok" | sed -r 's/.*\/([^/]*)/\1.patch/'`
+
+		diff -auN "$i_a_ok" "$i_b" > "$ADRESS/extract/diff/$name"
+
+		if [ -s "$ADRESS/extract/diff/$name" ];then
+			dir_uprava=`printf "%s" "$i_a_ok" | sed -r 's/a(.*)/c\1/'`
+			mdir=`printf "%s" "$dir_uprava" | sed -r 's/(.*)\/[^/]*/\1/'`
+
+			mkdir -p "$ADRESS"/"$mdir"
+			mv "$ADRESS/extract/diff/$name" "$ADRESS/$mdir"
+			rm -f "$ADRESS/extract/diff/$name"		
+			list_add=`printf "%s" "$i_a_ok" | sed -r 's/(a\/)(.*)/\2/'`
+			if [ -z "$LIST_DIR" ];then
+				LIST_DIR="$list_add"
+			else
+				LIST_DIR=`printf "%s" "$LIST_DIR"; printf "\n"; printf "%s" "$list_add"`
+			fi
+		else
+			rm -f "$ADRESS/extract/diff/$name"
+		fi
+	done
+
+
+	#tie co su samostatne v jednom alebo druhom subore
+	diff_out=""
+	for i in $2
+	do
+		#nahradenie ~~ za space
+		i_ok=`printf "%s" "$i" | sed -r 's/(~\/~)/ /g'`
+		#cestu upravim tak aby zacinala ackom
+		podmienka=`printf "%s" "$i_ok" | sed -r 's/[ab](.*)/a\1/'`
+		if [ "$i_ok" = "$podmienka" ];then
+			dir_uprava=`printf "%s" "$i_ok" | sed -r 's/a(.*)/b\1/'`
+		else
+			dir_uprava=`printf "%s" "$i_ok" | sed -r 's/b(.*)/a\1/'`
+		fi
+		
+		subor=`printf "%s" "$i_ok" | sed -r 's/.*\/([^/]*)/\1/'`
+		mdir_false=`printf "%s" "$dir_uprava" | sed -r 's/(.*)\/[^/]*/\1/'`
+
+		mdir_c=`printf "%s" "$i_ok" | sed -r 's/[ab](.*)\/[^/]*/c\1/'`
+
+		#vytvorenie adresara pre vysledny archiv
+		mkdir -p "$ADRESS"/"$mdir_c"
+		#podla toho ci je i z prveho argumentu skriptu
+		#konvencia arg1 neexistujuci
+		#          neexistujuci arg2
+		podmienka=`printf "%s" "$i_ok" | sed -r 's/([ab]).*/\1/'`
+		#ak ano tak cesta v i_ok zacina a-ckom
+		if [ "$podmienka" = "a" ];then
+			mv b "$$"
+			mkdir -p "$mdir_false"
+			diff -auN "$i_ok" "$mdir_false/$subor" > "$ADRESS"/"$mdir_c"/"$subor".patch
+			rm -R "$ADRESS"/extract/b
+			mv "$$" b
+		else
+			mv a "$$"
+			mkdir -p "$mdir_false"
+			diff -auN "$mdir_false/$subor" "$i_ok" > "$ADRESS"/"$mdir_c"/"$subor".patch
+			rm -R "$ADRESS"/extract/a
+			mv "$$" a
+		fi 
+		list_add=`printf "%s" "$i_ok" | sed -r 's/(^[ab]\/)(.*)/\2/'`
+		if [ -z "$LIST_DIR" ];then
+				LIST_DIR="$list_add"
+		else
+			LIST_DIR=`printf "%s" "$LIST_DIR"; printf "\n"; printf "%s" "$list_add"`
+		fi
+	done
+	cd ..
+}
+
+#funckia zabali vysledny archiv z /tmp/$$.ardiff/c...
+#nazov vysledneho subory najde v premennej $CIEL
+#podla pripony ho zabali a skopiruje do stareho pwd
+createZip()
+{
+	case $CIEL in
+	*.zip)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.zip/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.zip/\1/'`
+		fi
+
+		cd "$ADRESS"/c
+		zip -qq -r  "$rename" .
+		cd "$ADRESS"
+		mv  "$ADRESS"/c/"$rename".zip "$ADRESS"/"$rename".zip
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".zip "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".zip "$dir_uprava"
+		fi
+
+		;;
+	*.ZIP)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.ZIP/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.ZIP/\1/'`
+		fi
+		cd "$ADRESS"/c
+		zip -qq -r "$rename" .
+		cd "$ADRESS"
+		#premenovanie na .ZIP
+		mv  "$ADRESS"/c/"$rename".zip "$ADRESS"/"$rename".ZIP
+
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".ZIP "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".ZIP "$dir_uprava"
+		fi
+		;;
+	*.tar)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.tar/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.tar/\1/'`
+		fi
+		tar -cf "$rename".tar -C "$ADRESS/c" .
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".tar "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".tar "$dir_uprava"
+		fi
+		;;
+	*.tgz)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.tgz/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.tgz/\1/'`
+		fi
+		tar -czf "$rename".tgz  -C "$ADRESS/c" .
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".tgz "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".tgz "$dir_uprava"
+		fi
+		;;
+	*.tar.gz)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.tar\.gz/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.tar\.gz/\1/'`
+		fi
+		tar -czf "$rename".tar.gz -C "$ADRESS/c" .
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".tar.gz "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".tar.gz "$dir_uprava"
+		fi
+		;;
+	*.bzip2)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.bzip2/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.bzip2/\1/'`
+		fi
+		tar -cjf "$rename".bzip2 -C "$ADRESS/c" .
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".bzip2 "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".bzip2 "$dir_uprava"
+		fi
+		;;
+	*.tar.bz2)
+		link=`printf "%s" "$CIEL" | grep "/"`
+		if [ -z "$link" ];then
+			rename=`printf "%s" "$CIEL" | sed -r 's/(.*)\.tar\.bz2/\1/'`
+		else
+			rename=`printf "%s" "$CIEL" | sed -r 's/.*\/([^/]*)\.tar\.bz2/\1/'`
+		fi
+		tar -cjf "$rename".tar.bz2 -C "$ADRESS/c" .
+		if [ -z "$link" ]; then
+			cp  "$ADRESS"/"$rename".tar.bz2 "$OLD_ADRESS"
+		else
+			dir_uprava=`printf "%s" "$CIEL" | sed -r 's/(.*\/)[^/]*/\1/'`
+			cp  "$ADRESS"/"$rename".tar.bz2 "$dir_uprava"
+		fi
+		;;
+	*)
+		errorExit "Zly archiv vystupneho suboru!"
+		;;
+	esac
+}
+
+#funkcia vytlaci vsetky argumenty s ktorymi sa volala
+list() 
+{
+	for i in $@
+	do
+		i_ok=`printf "%s" "$i" | sed -r 's/(~\/~)/ /g'`
+		printf "%s" "$i_ok"
+		printf "\n"
+	done
+}
+
+#funckia dostane 2 argumenty
+# povodny archiv a rozdielny archiv 
+#nasledne vytvori povodny archiv 
+#ak sa zavola s old diff    vytvory new
+#ak sa zavola s new diff    vytvori old
+createOriginalyArch()
+{
+	mkdir -p "$ADRESS"/help
+	#konstrukcia najde to co malo old a new spolocne, cize to prekopiruje
+	#najde to co je v old/new  a nie je v diff
+	diff_uprava=`printf "%s" "$2" | sed -r 's/b(.*)\.patch/a\1/'`
+	for i in $1
+	do
+		rozdielne=`printf "%s" "$diff_uprava" | grep -F -x "$i"`
+		i_ok=`printf "%s" "$i" | sed -r 's/(~\/~)/ /g'`
+		i_ok=`printf "%s" "$i_ok" | sed 's/( )/\\\&/g'`
+
+		if [ -z "$rozdielne" ];then
+			mdir=`printf "%s" "$i_ok" | sed -r 's/a(.*)\/[^/]*/c\1/'`
+			mkdir -p "$ADRESS"/"$mdir"
+			
+			#zaloha
+			cp extract/"$i_ok" "$ADRESS"/help
+
+			mv extract/"$i_ok"  "$ADRESS"/"$mdir"
+			
+			subor=`printf "%s" "$i_ok" | sed -r 's/.*\/([^/]*)/\1/'`
+			dir=`printf "%s" "$i_ok" | sed -r 's/(.*)\/[^/]*/\1/'`
+			mv "$ADRESS"/help/"$subor" "$ADRESS"/extract/"$dir/"
+		fi
+	done 
+
+	old_uprava=`printf "%s" "$1" | sed -r 's/a(.*)/b\1.patch/'`
+	#prechadzam adresy z diff
+	for i in $2
+	do
+		rovnake=`printf "%s" "$old_uprava" | grep -F -x "$i"`
+		i_ok=`printf "%s" "$i" | sed -r 's/(~\/~)/ /g'`
+		#ak nenasiel nic tak je to iba z new
+		if [ -z "$rovnake" ];then 
+			
+			mdir=`printf "%s" "$i_ok" | sed -r 's/b(.*)\/[^/]*/c\1/'`
+			subor=`printf "%s" "$i_ok" | sed -r 's/.*\/([^/]*)\.patch/\1/'`
+			mkdir -p "$ADRESS"/"$mdir"
+			if [ "$RESERVE" -eq 1 ];then
+				patch -s -R -i extract/"$i_ok" -o "$subor"
+			else
+				patch -s -i extract/"$i_ok" -o "$subor"
+			fi
+			mv "$ADRESS"/"$subor" "$ADRESS"/"$mdir"
+		#ak nasiel nieco tak to moze byt iba z old alebo old/new
+		else
+			cesta=`printf "%s" "$i_ok" | sed -r 's/b(.*)\.patch/a\1/'`
+			#prekopirujem si subor niekde inde aby som on neprisiel
+
+			cp "$ADRESS"/extract/"$cesta" "$ADRESS"/help
+
+			if [ "$RESERVE" -eq 1 ];then
+				patch -s -R extract/"$cesta" -i extract/"$i_ok"
+			else
+				patch -s extract/"$cesta" -i extract/"$i_ok"
+			fi
+			if [ -f extract/"$cesta" ];then
+				mdir=`printf "%s" "$i_ok" | sed -r 's/b(.*)\/[^/]*/c\1/'`
+				mkdir -p "$ADRESS"/"$mdir"
+				mv extract/"$cesta" "$ADRESS"/"$mdir"
+			fi
+			subor=`printf "%s" "$i_ok" | sed -r 's/.*\/([^/]*)\.patch/\1/'`
+			cesta=`printf "%s" "$i_ok" | sed -r 's/b(.*)\/[^/]*/a\1/'`			
+	
+			if [ -d "$ADRESS"/extract/"$cesta" ]; then
+				mv "$ADRESS"/help/"$subor" "$ADRESS"/extract/"$cesta"
+			else 
+				mkdir -p "$ADRESS"/extract/"$cesta"
+				mv "$ADRESS"/help/"$subor" "$ADRESS"/extract/"$cesta"
+			fi
+		fi
+	done
+	rm -R "$ADRESS"/help
+}
+
+#Zaciatok skriptu
+################################################
+################################################
+
+#skript skonci ak sme nezadali ziadny parameter na prikazovom riadku, a vypise napovedu
+if [ $# -eq "$ARGUMENT" ]; then
+	echo "ardiff vypisuje zmeny archivu, vytvari rozdilovy archiv nebo aplikuje rozdilovy"
+	echo "archiv na zdrojovy archiv."
+	echo "Pouziti: ardiff [volby] archiv1 archiv2"
+	echo "Volby:"
+	echo "  -o SOUBOR  Pokud je cilem skriptu vytvorit archiv, bude vytvoren do souboru"
+	echo "             se jmenem SOUBOR (plati pro -c a -p)."
+	echo "  -l         Vypis seznamu souboru, ktere se v zadanych archivech lisi."
+	echo "  -c         Vytvoreni rozdiloveho archivu."
+	echo "  -p         Aplikace rozdiloveho archivu (argument archiv2) na zdrojovy archiv"
+	echo "             (argument archiv1)."
+	echo "  -r         Prepnuti do reverzniho rezimu (plati pro -p)."
+	exit 1
+fi
+
+#preberanie prarametrov z prik riadku
+while getopts ":lo:cpr" opt
+do
+	case $opt in
+	l)
+		ARGUMENT=1
+		LIST=1 
+		;;
+	o) 
+		ARGUMENT=1
+		DO_SUBORU=1
+		CIEL="$OPTARG"
+		;;
+	c)
+		ARGUMENT=1
+		ROZDIELNY=1
+		;;
+	p)
+		ARGUMENT=1
+		APLY_ROZDIELNY=1
+		;;
+	r)
+		ARGUMENT=1
+		RESERVE=1
+		;;
+	:)
+		errorExit "Volba -o vyzaduje argument!" 
+		;;
+	*)
+		errorExit "Bol zadany neplatny prepinac!"
+		;;
+	esac	
+done
+
+#posun argumentov
+shift $(($OPTIND - 1))
+
+if [ "$ROZDIELNY" -eq 1 -a "$APLY_ROZDIELNY" -eq 0 -a "$RESERVE" -eq 0 -a "$DO_SUBORU" -eq 0 -a "$LIST" -eq 1 ];then
+	unzipArguments "$1" "a"
+	unzipArguments "$2" "b"
+	
+	getDirections "a"
+	DIRS_A="$dir_all"
+	getDirections "b"
+	DIRS_B="$dir_all"
+
+	compareDirections "$DIRS_A" "$DIRS_B"
+	createArch "$DIR_SPOLOCNE" "$DIR_ROZDIELNE"
+
+	list "$LIST_DIR"
+
+	successExit
+else
+	if [ "$ROZDIELNY" -eq 1 -a "$APLY_ROZDIELNY" -eq 0 -a "$RESERVE" -eq 0 ];then
+		unzipArguments "$1" "a"
+		unzipArguments "$2" "b"
+	
+		getDirections "a"
+		DIRS_A="$dir_all"
+		getDirections "b"
+		DIRS_B="$dir_all"
+
+		compareDirections "$DIRS_A" "$DIRS_B"
+		createArch "$DIR_SPOLOCNE" "$DIR_ROZDIELNE"
+
+		if [ "$LIST" -eq 1 ];then
+			list "$LIST_DIR"
+		fi
+
+		if [ "$DO_SUBORU" -eq 1 ];then
+			createZip
+		fi
+		successExit
+
+	elif [ "$APLY_ROZDIELNY" -eq 1 -a "$ROZDIELNY" -eq 0 -a "$LIST" -eq 0 ];then 
+		unzipArguments "$1" "a"
+		unzipArguments "$2" "b"
+	
+		getDirections "a"
+		DIRS_A="$dir_all"
+		getDirections "b"
+		DIRS_B="$dir_all"
+
+		createOriginalyArch "$DIRS_A" "$DIRS_B"
+
+		if [ "$DO_SUBORU" -eq 1 ];then
+		createZip
+		fi
+		successExit
+	else
+		errorExit "Zadali ste zle prepinace!"
+	fi
+fi

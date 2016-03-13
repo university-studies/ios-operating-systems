@@ -1,0 +1,89 @@
+#!/bin/sh
+
+#Encoding: utf-8
+#Project: 1. do predmetu IOS, varianta B
+#Atuthor: Pavol Loffay BIB-30, xloffa00@stud.fit.vutbr.cz
+#Date: 4.3.2011
+#Description: vytvorte skript, ktory preformatuje vystup programu strace, tak ze urcite polozky da do html tagov.
+arg_s=0
+export LC_ALL=C
+
+exitError()
+{
+	printf "%s" "$1" >&2
+	printf "\n" >&2
+	exit 1
+}
+
+while getopts ":hs:" arg 
+do
+	case $arg in
+		h)
+			printf "%s" "hltrace zvyrazni syntax stopy od strace."; printf "\n"
+			printf "%s" "Pouziti: hltrace [volby] <stopa.strace >stopa.html"; printf "\n"
+			printf "%s" "Volby:"; printf "\n"
+			printf "%s" "      -s SYSCAL Specialne zvyrazni volani SYSCALL."; printf "\n"
+			exit 0
+			;;
+		s) 
+			arg_s=1
+			CALL="$OPTARG"
+			CALL=`printf "%s" "$CALL" | sed 's/[^a-zA-Z0-9]/\\\&/g'`
+			;;
+		:)
+			exitError "Volba -s vyzaduje a argument!"
+			;;
+		*) 
+			exitError "Bol zadany zly prepinac!"
+			;;
+	esac
+done
+
+if [ "$arg_s" -eq 0 ];then
+	CALL="\&\&\&\&\&\&\&\&\&"
+fi
+
+printf "<html>"; printf "\n"
+printf "<style>"; printf "\n"
+#tiedy zvyraznenia
+printf "%s" ".pid { color:darkred; }" ; printf "\n"
+printf "%s" ".ts { color:navy; }"; printf "\n"
+printf "%s" ".number { color:red; }"; printf "\n"
+printf "%s" ".const { color:green; }"; printf "\n"
+printf "%s" ".string { color:blue; }"; printf "\n"
+printf "%s" ".hlcall { text-decoration:none; font-weight:bold; color:black; }"; printf "\n"
+printf "%s" ".call { text-decoration:none; color:olive; }"; printf "\n"
+
+printf "%s" "</style>"; printf "\n"
+printf "%s" "<body><pre>"; printf "\n"
+
+#nahradenie & za &amp
+	sed 's/&/\&amp;/g' | \
+#nahradenie < za &lt
+	sed 's/</\&lt;/g' | \
+#nahradenie > za &gt
+	sed 's/>/\&gt;/g' | \
+
+
+#oznacenie textu "dasda/| " .string tagom 
+	sed -r 's/("[^"]*")/\<span class="string">\1\<\/span>/g' | \
+#oznacenie .hlcall (execve)
+	sed -r "s/(^| )("$CALL")(\()/\1<a href=""\"http:\/\/www.kernel.org\/doc\/man-pages\/online\/pages\/man2\/\2.2.html\""" class=""\"hlcall\""">\2<\/a>\3/" | \
+#oznacenie .pid ^cislo
+	sed -r 's/(^[0-9][0-9]*)/<span class="pid">\1<\/span>/' | \
+#oznacenie .ts  cas, 2hy stlpec za pid
+	sed -r 's/(^<span class="pid">[0-9][0-9]*<\/span>  *)([0-9][0-9]*\.[0-9][0-9]*)/\1<span class="ts">\2<\/span>/' | \
+#oznacenie .call, text nasledujuci za ts
+	sed -r 's/(^| )([a-z][a-z1-9]*[_[a-z1-9]*]*)(\()/\1<a href="http:\/\/www.kernel.org\/doc\/man-pages\/online\/pages\/man2\/\2.2.html" class="call">\2<\/a>\3/' | \
+#oznacenie .cost cize text ASLA ASA_SDAD_DA
+	sed -r 's/([ \[|\&{\(=])([A-Z][0-9A-Z_][A-Z_0-9]+[A-Z0-9_]*)/\1<span class="const">\2<\/span>/g' | \
+#oznacenie .number ale iba hexadecimalnych cisel 0xabcdef123456789
+	sed -r 's/([ (])(0x[0-9a-f][0-9a-f]*)/\1<span class="number">\2<\/span>/g' | \
+#oznacenie .number = 166
+	sed -r 's/( = )(-?[0-9][0-9]*)/\1<span class="number">\2<\/span>/g' | \
+#oznacenie .number ked je napr. ./(5) 4, (1,
+	sed -r 's/([ (])(-?[0-9][0-9]*)([,)])/\1<span class="number">\2<\/span>\3/g'
+
+printf "%s" "</pre></body></html>"; printf "\n"
+
+exit 0
